@@ -258,8 +258,7 @@ public class SyncService {
       blockWaitToProcess.putAll(blockJustReceived);
       blockJustReceived.clear();
       // 获取按区块高度排序的条目列表
-      List<Map.Entry<BlockMsg, PeerConnection>> sortedEntries = blockWaitToProcess.entrySet().stream().sorted(Comparator.comparingLong(entry -> entry.getKey().getBlockId().getNum()))
-    .collect(Collectors.toList());
+      List<Map.Entry<BlockMessage, PeerConnection>> sortedEntries = blockWaitToProcess.entrySet().stream().sorted(Comparator.comparingLong(entry -> entry.getKey().getBlockId().getNum())).collect(Collectors.toList());
     }
 
     final boolean[] isProcessed = {true};
@@ -328,6 +327,7 @@ public class SyncService {
         peer.getSyncBlockToFetch().remove(bid);
 	if(peer.getSyncBlockInProcess().contains(blockId)){
 	  peer.getSyncBlockInProcess().remove(blockId);
+	}
         if (flag) {
           peer.setBlockBothHave(blockId);
           if (peer.getSyncBlockToFetch().isEmpty() && peer.isFetchAble()) {
