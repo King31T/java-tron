@@ -255,12 +255,12 @@ public class SyncService {
   }
 
   private synchronized void handleSyncBlock() {
-
+    List<Map.Entry<BlockMessage, PeerConnection>> sortedEntries;
     synchronized (blockJustReceived) {
       blockWaitToProcess.putAll(blockJustReceived);
       blockJustReceived.clear();
       // 获取按区块高度排序的条目列表
-      List<Map.Entry<BlockMessage, PeerConnection>> sortedEntries = blockWaitToProcess.entrySet().stream().sorted(Comparator.comparingLong(entry -> entry.getKey().getBlockId().getNum())).collect(Collectors.toList());
+      sortedEntries = blockWaitToProcess.entrySet().stream().sorted(Comparator.comparingLong(entry -> entry.getKey().getBlockId().getNum())).collect(Collectors.toList());
     }
 
     final boolean[] isProcessed = {true};
