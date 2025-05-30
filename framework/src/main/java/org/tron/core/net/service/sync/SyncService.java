@@ -257,6 +257,9 @@ public class SyncService {
     synchronized (blockJustReceived) {
       blockWaitToProcess.putAll(blockJustReceived);
       blockJustReceived.clear();
+      // 获取按区块高度排序的条目列表
+      List<Map.Entry<BlockMsg, PeerConnection>> sortedEntries = blockWaitToProcess.entrySet().stream().sorted(Comparator.comparingLong(entry -> entry.getKey().getBlockId().getNum()))
+    .collect(Collectors.toList());
     }
 
     final boolean[] isProcessed = {true};
@@ -266,7 +269,10 @@ public class SyncService {
 
       isProcessed[0] = false;
 
-      blockWaitToProcess.forEach((msg, peerConnection) -> {
+      //blockWaitToProcess.forEach((msg, peerConnection) -> {
+      sortedEntries.forEach(entry -> {
+        BlockMessage msg = entry.getKey();
+        PeerConnection peerConnection = entry.getValue();
         synchronized (tronNetDelegate.getBlockLock()) {
           if (peerConnection.isDisconnect()) {
             blockWaitToProcess.remove(msg);
@@ -279,16 +285,12 @@ public class SyncService {
             return;
           }
           final boolean[] isFound = {false};
-          tronNetDelegate.getActivePeer().stream()
-              .filter(peer -> msg.getBlockId().equals(peer.getSyncBlockToFetch().peek()))
-              .forEach(peer -> {
-                isFound[0] = true;
-              });
+	  isFound[0] = tronNetDelegate.getActivePeer().stream().anyMatch(peer -> msg.getBlockId().equals(peer.getSyncBlockToFetch().peek()));
           if (isFound[0]) {
             blockWaitToProcess.remove(msg);
             isProcessed[0] = true;
             processSyncBlock(msg.getBlockCapsule(), peerConnection);
-            peerConnection.getSyncBlockInProcess().remove(msg.getBlockId());
+            //peerConnection.getSyncBlockInProcess().remove(msg.getBlockId());
           }
         }
       });
@@ -324,6 +326,8 @@ public class SyncService {
       BlockId bid = peer.getSyncBlockToFetch().peek();
       if (blockId.equals(bid)) {
         peer.getSyncBlockToFetch().remove(bid);
+	if(peer.getSyncBlockInProcess().contains(blockId)){
+	  peer.getSyncBlockInProcess().remove(blockId);
         if (flag) {
           peer.setBlockBothHave(blockId);
           if (peer.getSyncBlockToFetch().isEmpty() && peer.isFetchAble()) {
