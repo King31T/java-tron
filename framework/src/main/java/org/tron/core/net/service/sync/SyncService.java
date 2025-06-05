@@ -45,6 +45,7 @@ public class SyncService {
   private PbftDataSyncHandler pbftDataSyncHandler;
 
   private Map<BlockMessage, PeerConnection> blockWaitToProcess = new ConcurrentHashMap<>();
+  private Map<BlockId, BlockMessage> blockIdToMessageMap = new ConcurrentHashMap<>(); // 新增的映射表
 
   private Map<BlockMessage, PeerConnection> blockJustReceived = new ConcurrentHashMap<>();
 
@@ -253,46 +254,56 @@ public class SyncService {
   }
 
   private synchronized void handleSyncBlock() {
-
+    // 合并新收到的区块
     synchronized (blockJustReceived) {
       blockWaitToProcess.putAll(blockJustReceived);
+      blockJustReceived.forEach((msg, p) -> blockIdToMessageMap.put(msg.getBlockId(), msg));
       blockJustReceived.clear();
     }
 
-    final boolean[] isProcessed = {true};
     long solidNum = tronNetDelegate.getSolidBlockId().getNum();
 
-    while (isProcessed[0]) {
-
-      isProcessed[0] = false;
-
-      blockWaitToProcess.forEach((msg, peerConnection) -> {
+    boolean foundBlock;
+    do {
+      foundBlock = false;
+      // 遍历所有活跃节点
+      for (PeerConnection peer : tronNetDelegate.getActivePeer()) {
         synchronized (tronNetDelegate.getBlockLock()) {
-          if (peerConnection.isDisconnect()) {
-            blockWaitToProcess.remove(msg);
-            invalid(msg.getBlockId(), peerConnection);
-            return;
+          if (peer.getSyncBlockToFetch().isEmpty()) {
+            continue;
           }
-          if (msg.getBlockId().getNum() <= solidNum) {
+
+          BlockId blockId = peer.getSyncBlockToFetch().peek();
+          BlockMessage msg = blockIdToMessageMap.get(blockId);
+
+          if (msg != null) {
+            PeerConnection msgPeer = blockWaitToProcess.get(msg);
+
+            if (msgPeer.isDisconnect()) {
+              blockWaitToProcess.remove(msg);
+              blockIdToMessageMap.remove(blockId);
+              invalid(blockId, msgPeer);
+              continue;
+            }
+
+            if (blockId.getNum() <= solidNum) {
+              blockWaitToProcess.remove(msg);
+              blockIdToMessageMap.remove(blockId);
+              msgPeer.getSyncBlockInProcess().remove(blockId);
+              continue;
+            }
+
+            // 处理区块
             blockWaitToProcess.remove(msg);
-            peerConnection.getSyncBlockInProcess().remove(msg.getBlockId());
-            return;
-          }
-          final boolean[] isFound = {false};
-          tronNetDelegate.getActivePeer().stream()
-              .filter(peer -> msg.getBlockId().equals(peer.getSyncBlockToFetch().peek()))
-              .forEach(peer -> {
-                isFound[0] = true;
-              });
-          if (isFound[0]) {
-            blockWaitToProcess.remove(msg);
-            isProcessed[0] = true;
-            processSyncBlock(msg.getBlockCapsule(), peerConnection);
-            peerConnection.getSyncBlockInProcess().remove(msg.getBlockId());
+            blockIdToMessageMap.remove(blockId);
+            processSyncBlock(msg.getBlockCapsule(), msgPeer);
+            msgPeer.getSyncBlockInProcess().remove(blockId); 
+            foundBlock = true;
+            break;
           }
         }
-      });
-    }
+      }
+    } while (foundBlock);
   }
 
   private void processSyncBlock(BlockCapsule block, PeerConnection peerConnection) {
