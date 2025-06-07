@@ -10,8 +10,8 @@ import java.util.HashMap;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
-import java.util.PriorityQueue;
 import java.util.Comparator;
+import java.util.PriorityQueue;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -46,7 +46,7 @@ public class SyncService {
   @Autowired
   private PbftDataSyncHandler pbftDataSyncHandler;
 
-  private Map<BlockMessage, PeerConnection> blockWaitToProcess = new ConcurrentHashMap<>();
+  //private Map<BlockMessage, PeerConnection> blockWaitToProcess = new ConcurrentHashMap<>();
   // 替换原有的 ConcurrentHashMap
   private PriorityQueue<Pair<BlockMessage, PeerConnection>> blockWaitToProcess = new PriorityQueue<>(Comparator.comparingLong(pair -> pair.getKey().getBlockId().getNum()));
 
