@@ -10,6 +10,8 @@ import java.util.HashMap;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
+import java.util.PriorityQueue;
+import java.util.Comparator;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -45,6 +47,8 @@ public class SyncService {
   private PbftDataSyncHandler pbftDataSyncHandler;
 
   private Map<BlockMessage, PeerConnection> blockWaitToProcess = new ConcurrentHashMap<>();
+  // 替换原有的 ConcurrentHashMap
+  private PriorityQueue<Pair<BlockMessage, PeerConnection>> blockWaitToProcess = new PriorityQueue<>(Comparator.comparingLong(pair -> pair.getKey().getBlockId().getNum()));
 
   private Map<BlockMessage, PeerConnection> blockJustReceived = new ConcurrentHashMap<>();
 
@@ -252,46 +256,46 @@ public class SyncService {
     });
   }
 
+  
   private synchronized void handleSyncBlock() {
-
     synchronized (blockJustReceived) {
-      blockWaitToProcess.putAll(blockJustReceived);
+      blockJustReceived.forEach((msg, peer) -> 
+        blockWaitToProcess.offer(new Pair<>(msg, peer)));
       blockJustReceived.clear();
     }
 
-    final boolean[] isProcessed = {true};
-    long solidNum = tronNetDelegate.getSolidBlockId().getNum();
+    while (!blockWaitToProcess.isEmpty()) {
+      Pair<BlockMessage, PeerConnection> pair = blockWaitToProcess.peek();
+      BlockMessage msg = pair.getKey();
+      PeerConnection peerConnection = pair.getValue();
 
-    while (isProcessed[0]) {
-
-      isProcessed[0] = false;
-
-      blockWaitToProcess.forEach((msg, peerConnection) -> {
-        synchronized (tronNetDelegate.getBlockLock()) {
-          if (peerConnection.isDisconnect()) {
-            blockWaitToProcess.remove(msg);
-            invalid(msg.getBlockId(), peerConnection);
-            return;
-          }
-          if (msg.getBlockId().getNum() <= solidNum) {
-            blockWaitToProcess.remove(msg);
-            peerConnection.getSyncBlockInProcess().remove(msg.getBlockId());
-            return;
-          }
-          final boolean[] isFound = {false};
-          tronNetDelegate.getActivePeer().stream()
-              .filter(peer -> msg.getBlockId().equals(peer.getSyncBlockToFetch().peek()))
-              .forEach(peer -> {
-                isFound[0] = true;
-              });
-          if (isFound[0]) {
-            blockWaitToProcess.remove(msg);
-            isProcessed[0] = true;
-            processSyncBlock(msg.getBlockCapsule(), peerConnection);
-            peerConnection.getSyncBlockInProcess().remove(msg.getBlockId());
-          }
+      synchronized (tronNetDelegate.getBlockLock()) {
+        if (peerConnection.isDisconnect()) {
+          blockWaitToProcess.poll();
+          invalid(msg.getBlockId(), peerConnection);
+          continue;
         }
-      });
+
+        long solidNum = tronNetDelegate.getSolidBlockId().getNum();
+        if (msg.getBlockId().getNum() <= solidNum) {
+          blockWaitToProcess.poll();
+          peerConnection.getSyncBlockInProcess().remove(msg.getBlockId());
+          continue;
+        }
+
+        // 检查是否是某个 peer 期望的下一个区块
+        boolean isExpectedBlock = tronNetDelegate.getActivePeer().stream()
+          .anyMatch(peer -> msg.getBlockId().equals(peer.getSyncBlockToFetch().peek()));
+
+        if (isExpectedBlock) {
+          blockWaitToProcess.poll();
+          processSyncBlock(msg.getBlockCapsule(), peerConnection);
+          peerConnection.getSyncBlockInProcess().remove(msg.getBlockId());
+        } else {
+          // 如果不是期望的区块，区块已经按高度排序，最低条件都不满足，直接丢弃即可,甚至是个坏块,需要再加一点逻辑，比如断开连接这种
+	  break;
+        }
+      }
     }
   }
 
