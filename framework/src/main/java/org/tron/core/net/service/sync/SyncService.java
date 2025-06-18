@@ -91,7 +91,7 @@ public class SyncService {
       } catch (Exception e) {
         logger.error("Handle sync block error", e);
       }
-    }, 10000, 100, TimeUnit.MILLISECONDS);
+    }, 10000, 30, TimeUnit.MILLISECONDS);
   }
 
   public void close() {
@@ -261,46 +261,42 @@ public class SyncService {
       blockJustReceived.clear();
     }
 
-    long solidNum = tronNetDelegate.getSolidBlockId().getNum();
-
+    long latestSolidNum = tronNetDelegate.getSolidBlockId().getNum();
+    blockWaitToProcess.forEach((msg, peerConnection) -> {
+      if (peerConnection.isDisconnect() || 
+		      msg.getBlockId().getNum() <= latestSolidNum) {
+          blockWaitToProcess.remove(msg);
+          blockIdToMessageMap.remove(msg.getBlockId());
+      }
+    });
+    
+    long solidNum = latestSolidNum;
     boolean foundBlock;
     do {
       foundBlock = false;
+      // 因为每次processSyncBlock的时候会更新solidNum
+      solidNum = tronNetDelegate.getSolidBlockId().getNum();
       // 遍历所有活跃节点
       for (PeerConnection peer : tronNetDelegate.getActivePeer()) {
-        synchronized (tronNetDelegate.getBlockLock()) {
-          if (peer.getSyncBlockToFetch().isEmpty()) {
-            continue;
-          }
+        if (peer.getSyncBlockToFetch().isEmpty()) {
+          continue;
+        }
 
-          BlockId blockId = peer.getSyncBlockToFetch().peek();
-          BlockMessage msg = blockIdToMessageMap.get(blockId);
+        BlockId blockId = peer.getSyncBlockToFetch().peek();
+        BlockMessage msg = blockIdToMessageMap.get(blockId);
 
-          if (msg != null) {
-            PeerConnection msgPeer = blockWaitToProcess.get(msg);
-
-            if (msgPeer.isDisconnect()) {
-              blockWaitToProcess.remove(msg);
-              blockIdToMessageMap.remove(blockId);
-              invalid(blockId, msgPeer);
-              continue;
-            }
-
-            if (blockId.getNum() <= solidNum) {
-              blockWaitToProcess.remove(msg);
-              blockIdToMessageMap.remove(blockId);
-              msgPeer.getSyncBlockInProcess().remove(blockId);
-              continue;
-            }
-
-            // 处理区块
-            blockWaitToProcess.remove(msg);
-            blockIdToMessageMap.remove(blockId);
+        if (msg != null) {
+          PeerConnection msgPeer = blockWaitToProcess.get(msg);
+          // 处理区块
+          blockWaitToProcess.remove(msg);
+          blockIdToMessageMap.remove(blockId);
+	  logger.info("Block {} is pProcessing", blockId.toString());
+          synchronized (tronNetDelegate.getBlockLock()) {
             processSyncBlock(msg.getBlockCapsule(), msgPeer);
             msgPeer.getSyncBlockInProcess().remove(blockId); 
-            foundBlock = true;
-            break;
-          }
+	  }
+          foundBlock = true;
+          break;
         }
       }
     } while (foundBlock);
