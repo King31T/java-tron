@@ -290,7 +290,7 @@ public class SyncService {
           // 处理区块
           blockWaitToProcess.remove(msg);
           blockIdToMessageMap.remove(blockId);
-	  logger.info("Block {} is pProcessing", blockId.toString());
+	  //logger.info("Block {} is pProcessing", blockId.toString());
           synchronized (tronNetDelegate.getBlockLock()) {
             processSyncBlock(msg.getBlockCapsule(), msgPeer);
             msgPeer.getSyncBlockInProcess().remove(blockId); 
