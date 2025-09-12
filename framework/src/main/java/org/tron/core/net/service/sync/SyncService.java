@@ -10,6 +10,7 @@ import java.util.HashMap;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -44,10 +45,9 @@ public class SyncService {
   @Autowired
   private PbftDataSyncHandler pbftDataSyncHandler;
 
-  private Map<BlockMessage, PeerConnection> blockWaitToProcess = new ConcurrentHashMap<>();
-  private Map<BlockId, BlockMessage> blockIdToMessageMap = new ConcurrentHashMap<>(); // 新增的映射表
+  private Map<BlockId, Pair<BlockMessage, PeerConnection>> blockWaitToProcess = new ConcurrentHashMap<>();
 
-  private Map<BlockMessage, PeerConnection> blockJustReceived = new ConcurrentHashMap<>();
+  private Map<BlockId, Pair<BlockMessage, PeerConnection>> blockJustReceived = new ConcurrentHashMap<>();
 
   private long blockCacheTimeout = Args.getInstance().getBlockCacheTimeout();
   private Cache<BlockId, PeerConnection> requestBlockIds = CacheBuilder.newBuilder()
@@ -91,7 +91,7 @@ public class SyncService {
       } catch (Exception e) {
         logger.error("Handle sync block error", e);
       }
-    }, 10000, 30, TimeUnit.MILLISECONDS);
+    }, 10000, 100, TimeUnit.MILLISECONDS);
   }
 
   public void close() {
@@ -132,12 +132,27 @@ public class SyncService {
 
   public void processBlock(PeerConnection peer, BlockMessage blockMessage) {
     synchronized (blockJustReceived) {
-      blockJustReceived.put(blockMessage, peer);
+      //blockJustReceived.put(blockMessage, peer);
+      blockJustReceived.put(blockMessage.getBlockId(), new Pair<>(blockMessage, peer));
     }
     handleFlag = true;
     if (peer.isSyncIdle()) {
       if (peer.getRemainNum() > 0
           && peer.getSyncBlockToFetch().size() <= syncFetchBatchNum) {
+        syncNext(peer);
+      } else {
+        fetchFlag = true;
+      }
+    }
+    //checkToSyncNextOrFetchNext(peer);
+    //if (peer.getSyncBlockRequested().isEmpty()) {
+    //  fetchFlag = true;
+    //}
+  }
+  
+  private void checkToSyncNextOrFetchNext(PeerConnection peer) {
+    if (peer.isSyncIdle() && peer.isFetchAble()) {
+      if (( peer.getRemainNum() == 0 && peer.getSyncBlockToFetch().isEmpty()) || (peer.getRemainNum() > 0 && peer.getSyncBlockToFetch().size() < syncFetchBatchNum)) {
         syncNext(peer);
       } else {
         fetchFlag = true;
@@ -254,55 +269,102 @@ public class SyncService {
   }
 
   private synchronized void handleSyncBlock() {
-    // 合并新收到的区块
+
     synchronized (blockJustReceived) {
       blockWaitToProcess.putAll(blockJustReceived);
-      blockJustReceived.forEach((msg, p) -> blockIdToMessageMap.put(msg.getBlockId(), msg));
+      //blockJustReceived.forEach((msg, p) -> blockIdToMessageMap.put(msg.getBlockId(), msg));
       blockJustReceived.clear();
+      //badBlocks.clear();
+      //badPeers.clear();
     }
 
-    long latestSolidNum = tronNetDelegate.getSolidBlockId().getNum();
-    blockWaitToProcess.forEach((msg, peerConnection) -> {
-      if (peerConnection.isDisconnect() || 
-		      msg.getBlockId().getNum() <= latestSolidNum) {
-          blockWaitToProcess.remove(msg);
-          blockIdToMessageMap.remove(msg.getBlockId());
+    long solidNum = tronNetDelegate.getSolidBlockId().getNum();
+    //处理之前先清扫一遍 。保持之前的逻辑不变
+    blockWaitToProcess.forEach((blockId, pair) -> {
+      PeerConnection peerConnection = pair.getValue();
+      if (peerConnection.isDisconnect()) {
+          blockWaitToProcess.remove(blockId);
+          // 实际上在disconnect后会回调onDisconnect函数，onDisconnect会处理这些，这儿用这个逻辑的原因是什么呢？
+          invalid(blockId, peerConnection);
+          return;
       }
+      if (blockId.getNum() <= solidNum) {
+          // 实际上出现这个情况时，逻辑可以再狠一点直接断开这个peerConnection了
+          blockWaitToProcess.remove(blockId);
+          peerConnection.getSyncBlockInProcess().remove(blockId);
+          return;
+      } 
     });
-    
-    long solidNum = latestSolidNum;
-    boolean foundBlock;
-    do {
-      foundBlock = false;
-      // 因为每次processSyncBlock的时候会更新solidNum
-      solidNum = tronNetDelegate.getSolidBlockId().getNum();
-      // 遍历所有活跃节点
-      for (PeerConnection peer : tronNetDelegate.getActivePeer()) {
-        if (peer.getSyncBlockToFetch().isEmpty()) {
-          continue;
-        }
 
-        BlockId blockId = peer.getSyncBlockToFetch().peek();
-        BlockMessage msg = blockIdToMessageMap.get(blockId);
+    //正式处理
+    boolean flagNext = true;
+    while(flagNext){
+      flagNext = false;
+      //BlockId blockProcessed = new BlockId();
+      synchronized (tronNetDelegate.getBlockLock()) {
+        Map<BlockId, Boolean> processedBlocksMap = new HashMap<>();
+        for (PeerConnection peer : tronNetDelegate.getActivePeer()) {
+          // 在处理前面的peer时可能会断开后面的peer，比如后面的peer传输回来一些坏块，或者因为网络原因断开
+          if (peer.isDisconnect()) {
+            continue;
+          }
+          if (peer.getSyncBlockToFetch().isEmpty()) {
+            continue;
+          }
+          BlockId blockId = peer.getSyncBlockToFetch().peek();
+          // 之前的peer已经处理过
+          if (processedBlocksMap.containsKey(blockId)) {
+            if (processedBlocksMap.get(blockId)) {// 好块
+              peer.getSyncBlockToFetch().pop();
+              peer.setBlockBothHave(blockId);
+              if (peer.getSyncBlockToFetch().isEmpty() && peer.isFetchAble()) {
+                syncNext(peer);
+              }
+              //checkToSyncNextOrFetchNext(peer);
+            } else { //坏块
+              peer.disconnect(ReasonCode.BAD_BLOCK);  
+            }
+          } else if (blockWaitToProcess.containsKey(blockId)) {
+            Pair<BlockMessage, PeerConnection> pair = blockWaitToProcess.get(blockId);
+            BlockMessage msg = pair.getKey();
+            PeerConnection msgPeer = pair.getValue();
+            // 处理区块
+            blockWaitToProcess.remove(blockId);
+            msgPeer.getSyncBlockInProcess().remove(blockId);
 
-        if (msg != null) {
-          PeerConnection msgPeer = blockWaitToProcess.get(msg);
-          // 处理区块
-          blockWaitToProcess.remove(msg);
-          blockIdToMessageMap.remove(blockId);
-	  //logger.info("Block {} is pProcessing", blockId.toString());
-          synchronized (tronNetDelegate.getBlockLock()) {
-            processSyncBlock(msg.getBlockCapsule(), msgPeer);
-            msgPeer.getSyncBlockInProcess().remove(blockId); 
-	  }
-          foundBlock = true;
-          break;
+            //logger.info("Block {} is pProcessing", blockId.toString());
+            boolean[] flags = processSyncBlock(msg.getBlockCapsule(), msgPeer);
+            boolean attackFlag = flags[0];
+            boolean flag = flags[1];
+            processedBlocksMap.put(blockId, flag);
+            if (attackFlag) {
+              invalid(blockId, msgPeer);
+              msgPeer.disconnect(ReasonCode.BAD_BLOCK);
+            } else if (flag) {
+              peer.getSyncBlockToFetch().pop();
+              peer.setBlockBothHave(blockId);
+              if (peer.getSyncBlockToFetch().isEmpty() && peer.isFetchAble()) {
+                syncNext(peer);
+              }
+              //checkToSyncNextOrFetchNext(peer);
+              //只要这一轮有一个成功处理，则设置flagNext=true
+              if (!flagNext) {
+                flagNext = true;
+              }
+            } else {
+              peer.disconnect(ReasonCode.BAD_BLOCK);
+            }
+          } else {
+            continue;
+          }
         }
-      }
-    } while (foundBlock);
+      }  
+    }
   }
 
-  private void processSyncBlock(BlockCapsule block, PeerConnection peerConnection) {
+    
+
+  private boolean[]  processSyncBlock(BlockCapsule block, PeerConnection peerConnection) {
     boolean flag = true;
     boolean attackFlag = false;
     BlockId blockId = block.getBlockId();
@@ -320,27 +382,17 @@ public class SyncService {
       logger.error("Process sync block {} failed", blockId.getString(), e);
       flag = false;
     }
+    return new boolean[]{attackFlag, flag};
+    //if (attackFlag) {
+    //  //invalid(blockId, peerConnection);
+    //  //peerConnection.disconnect(ReasonCode.BAD_BLOCK);
+    //  return 2;
+    //}
 
-    if (attackFlag) {
-      invalid(blockId, peerConnection);
-      peerConnection.disconnect(ReasonCode.BAD_BLOCK);
-      return;
-    }
-
-    for (PeerConnection peer : tronNetDelegate.getActivePeer()) {
-      BlockId bid = peer.getSyncBlockToFetch().peek();
-      if (blockId.equals(bid)) {
-        peer.getSyncBlockToFetch().remove(bid);
-        if (flag) {
-          peer.setBlockBothHave(blockId);
-          if (peer.getSyncBlockToFetch().isEmpty() && peer.isFetchAble()) {
-            syncNext(peer);
-          }
-        } else {
-          peer.disconnect(ReasonCode.BAD_BLOCK);
-        }
-      }
-    }
+    //if (flag) {
+    //  return 0;
+    //} else {
+    //  return 1;
+    //}
   }
-
 }
